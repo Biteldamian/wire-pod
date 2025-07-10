@@ -102,4 +102,5 @@ require (
 	gopkg.in/hraban/opus.v2 v2.0.0-20201025103112-d779bb1cc5a2 // indirect
 	gopkg.in/xmlpath.v2 v2.0.0-20150820204837-860cbeca3ebc // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -18,6 +18,7 @@ import (
 	"github.com/fforchino/vector-go-sdk/pkg/vectorpb"
 	"github.com/kercre123/wire-pod/chipper/pkg/logger"
 	"github.com/kercre123/wire-pod/chipper/pkg/vars"
+	"github.com/Biteldamian/wire-pod/chipper/pkg/wirepod/ai_proxy"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -186,6 +187,7 @@ func CreateAIReq(transcribedText, esn string, gpt3tryagain, isKG bool) openai.Ch
 	return aireq
 }
 
+
 func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bool) (string, error) {
 	start := make(chan bool)
 	stop := make(chan bool)
@@ -238,149 +240,72 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 	var fullfullRespText string
 	var fullRespSlice []string
 	var isDone bool
-	var c *openai.Client
-	if vars.APIConfig.Knowledge.Provider == "together" {
-		if vars.APIConfig.Knowledge.Model == "" {
-			vars.APIConfig.Knowledge.Model = "meta-llama/Llama-3-70b-chat-hf"
-			vars.WriteConfigToDisk()
-		}
-		conf := openai.DefaultConfig(vars.APIConfig.Knowledge.Key)
-		conf.BaseURL = "https://api.together.xyz/v1"
-		c = openai.NewClientWithConfig(conf)
-	} else if vars.APIConfig.Knowledge.Provider == "custom" {
-		conf := openai.DefaultConfig(vars.APIConfig.Knowledge.Key)
-		conf.BaseURL = vars.APIConfig.Knowledge.Endpoint
-		c = openai.NewClientWithConfig(conf)
-	} else if vars.APIConfig.Knowledge.Provider == "openai" {
-		c = openai.NewClient(vars.APIConfig.Knowledge.Key)
-	}
-	speakReady := make(chan string)
-	successIntent := make(chan bool)
 
-	aireq := CreateAIReq(transcribedText, esn, false, isKG)
-
-	stream, err := c.CreateChatCompletionStream(ctx, aireq)
+	// New: Use AI proxy for forwarding speech and getting response
+	proxy := ai_proxy.NewProxy()
+	prompt, err := ai_proxy.BuildPrompt(transcribedText)
 	if err != nil {
-        	log.Printf("Error creating chat completion stream: %v", err)
-		if strings.Contains(err.Error(), "does not exist") && vars.APIConfig.Knowledge.Provider == "openai" {
-			logger.Println("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
-			logger.LogUI("GPT-4 model cannot be accessed with this API key. You likely need to add more than $5 dollars of funds to your OpenAI account.")
-			aireq := CreateAIReq(transcribedText, esn, true, isKG)
-			logger.Println("Falling back to " + aireq.Model)
-			logger.LogUI("Falling back to " + aireq.Model)
-			stream, err = c.CreateChatCompletionStream(ctx, aireq)
-			if err != nil {
-				logger.Println("OpenAI still not returning a response even after falling back. Erroring.")
-				return "", err
+		logger.Println("Prompt build error: " + err.Error())
+		if isKG {
+			kgStopLooping = true
+			for range kgReadyToAnswer {
+				break
 			}
-		} else {
-			if isKG {
-				kgStopLooping = true
-				for range kgReadyToAnswer {
-					break
-				}
-				stop <- true
-				time.Sleep(time.Second / 3)
-				KGSim(esn, "There was an error getting data from the L. L. M.")
-			}
-			return "", err
+			stop <- true
+			time.Sleep(time.Second / 3)
+			KGSim(esn, "There was an error getting data from the L. L. M.")
 		}
+		return "", err
 	}
-	nChat := aireq.Messages
-	nChat = append(nChat, openai.ChatCompletionMessage{
-		Role: openai.ChatMessageRoleAssistant,
-	})
-	fmt.Println("LLM stream response: ")
-	go func() {
-		for {
-			response, err := stream.Recv()
-			if errors.Is(err, io.EOF) {
-				// prevents a crash
-				if len(fullRespSlice) == 0 {
-					logger.Println("LLM returned no response")
-					successIntent <- false
-					if isKG {
-						kgStopLooping = true
-						for range kgReadyToAnswer {
-							break
-						}
-						stop <- true
-						time.Sleep(time.Second / 3)
-						KGSim(esn, "There was an error getting data from the L. L. M.")
-					}
-					break
-				}
-				isDone = true
-				// if fullRespSlice != fullRespText, add that missing bit to fullRespSlice
-				newStr := fullRespSlice[0]
-				for i, str := range fullRespSlice {
-					if i == 0 {
-						continue
-					}
-					newStr = newStr + " " + str
-				}
-				if strings.TrimSpace(newStr) != strings.TrimSpace(fullfullRespText) {
-					logger.Println("LLM debug: there is content after the last punctuation mark")
-					extraBit := strings.TrimPrefix(fullRespText, newStr)
-					fullRespSlice = append(fullRespSlice, extraBit)
-				}
-				if vars.APIConfig.Knowledge.SaveChat {
-					Remember(openai.ChatCompletionMessage{
-						Role:    openai.ChatMessageRoleUser,
-						Content: transcribedText,
-					},
-						openai.ChatCompletionMessage{
-							Role:    openai.ChatMessageRoleAssistant,
-							Content: newStr,
-						},
-						esn)
-				}
-				logger.LogUI("LLM response for " + esn + ": " + newStr)
-				logger.Println("LLM stream finished")
-				return
+	aiResponse, err := proxy.SendPrompt(prompt)
+	if err != nil {
+		logger.Println("AI proxy error: " + err.Error())
+		if isKG {
+			kgStopLooping = true
+			for range kgReadyToAnswer {
+				break
 			}
-
-			if err != nil {
-				logger.Println("Stream error: " + err.Error())
-				return
-			}
-
-            		if (len(response.Choices) == 0) {
-                		logger.Println("Empty response")
-                		return
-            		}
-
-			fullfullRespText = fullfullRespText + removeSpecialCharacters(response.Choices[0].Delta.Content)
-			fullRespText = fullRespText + removeSpecialCharacters(response.Choices[0].Delta.Content)
-			if strings.Contains(fullRespText, "...") || strings.Contains(fullRespText, ".'") || strings.Contains(fullRespText, ".\"") || strings.Contains(fullRespText, ".") || strings.Contains(fullRespText, "?") || strings.Contains(fullRespText, "!") {
-				var sepStr string
-				if strings.Contains(fullRespText, "...") {
-					sepStr = "..."
-				} else if strings.Contains(fullRespText, ".'") {
-					sepStr = ".'"
-				} else if strings.Contains(fullRespText, ".\"") {
-					sepStr = ".\""
-				} else if strings.Contains(fullRespText, ".") {
-					sepStr = "."
-				} else if strings.Contains(fullRespText, "?") {
-					sepStr = "?"
-				} else if strings.Contains(fullRespText, "!") {
-					sepStr = "!"
-				}
-				splitResp := strings.Split(strings.TrimSpace(fullRespText), sepStr)
-				fullRespSlice = append(fullRespSlice, strings.TrimSpace(splitResp[0])+sepStr)
-				fullRespText = splitResp[1]
-				select {
-				case successIntent <- true:
-				default:
-				}
-				select {
-				case speakReady <- strings.TrimSpace(splitResp[0]) + sepStr:
-				default:
-				}
-			}
+			stop <- true
+			time.Sleep(time.Second / 3)
+			KGSim(esn, "There was an error getting data from the L. L. M.")
 		}
-	}()
+		return "", err
+	}
+	// Parse to command (e.g., TTS)
+	ttsCommand := proxy.ParseResponseToCommand(aiResponse)
+
+	// Since proxy is non-streaming, set full response directly
+	fullfullRespText = ttsCommand
+	fullRespText = ttsCommand
+	// Split into slices for punctuation-based processing (adapt existing logic)
+	if strings.Contains(fullRespText, "...") || strings.Contains(fullRespText, ".'") || strings.Contains(fullRespText, ".\"") || strings.Contains(fullRespText, ".") || strings.Contains(fullRespText, "?") || strings.Contains(fullRespText, "!") {
+		var sepStr string
+		if strings.Contains(fullRespText, "...") {
+			sepStr = "..."
+		} else if strings.Contains(fullRespText, ".'") {
+			sepStr = ".'"
+		} else if strings.Contains(fullRespText, ".\"") {
+			sepStr = ".\""
+		} else if strings.Contains(fullRespText, ".") {
+			sepStr = "."
+		} else if strings.Contains(fullRespText, "?") {
+			sepStr = "?"
+		} else if strings.Contains(fullRespText, "!") {
+			sepStr = "!"
+		}
+		splitResp := strings.Split(strings.TrimSpace(fullRespText), sepStr)
+		fullRespSlice = append(fullRespSlice, strings.TrimSpace(splitResp[0])+sepStr)
+		fullRespText = splitResp[1]
+	} else {
+		// If no punctuation, treat as single slice
+		fullRespSlice = append(fullRespSlice, fullRespText)
+	}
+	isDone = true
+	successIntent <- true
+
+	successIntent := make(chan bool)
+	speakReady := make(chan string)
+
 	for is := range successIntent {
 		if is {
 			if !isKG {
@@ -388,7 +313,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			}
 			break
 		} else {
-			return "", errors.New("llm returned no response")
+			return "", errors.New("ai proxy returned no response")
 		}
 	}
 	time.Sleep(time.Millisecond * 200)
@@ -454,7 +379,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			respSlice := fullRespSlice
 			if len(respSlice)-1 < numInResp {
 				if !isDone {
-					logger.Println("Waiting for more content from LLM...")
+					logger.Println("Waiting for more content from AI...")
 					for range speakReady {
 						respSlice = fullRespSlice
 						break
@@ -468,8 +393,7 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			}
 			logger.Println(respSlice[numInResp])
 			acts := GetActionsFromString(respSlice[numInResp])
-			nChat[len(nChat)-1].Content = fullRespText
-			disconnect = PerformActions(nChat, acts, robot, stopStop)
+			disconnect = PerformActions([]openai.ChatCompletionMessage{}, acts, robot, stopStop)  // Empty messages as proxy doesn't use chat history yet
 			if disconnect {
 				break
 			}
@@ -482,18 +406,6 @@ func StreamingKGSim(req interface{}, esn string, transcribedText string, isKG bo
 			}
 		}
 		time.Sleep(time.Millisecond * 100)
-		// if isKG {
-		// 	robot.Conn.PlayAnimation(
-		// 		ctx,
-		// 		&vectorpb.PlayAnimationRequest{
-		// 			Animation: &vectorpb.Animation{
-		// 				Name: "anim_knowledgegraph_success_01",
-		// 			},
-		// 			Loops: 1,
-		// 		},
-		// 	)
-		// 	time.Sleep(time.Millisecond * 3300)
-		// }
 		if !interrupted {
 			stopStop <- true
 			stop <- true
