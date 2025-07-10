@@ -3,7 +3,7 @@ package vars
 import (
 	"encoding/json"
 	"os"
-
+	"github.com/Biteldamian/wire-pod/chipper/pkg/wirepod/ai_proxy"
 	"github.com/kercre123/wire-pod/chipper/pkg/logger"
 )
 
@@ -41,6 +41,13 @@ type apiConfig struct {
 		Service  string `json:"provider"`
 		Language string `json:"language"`
 	} `json:"STT"`
+	AI struct {
+        Enable   bool   `json:"enable"`    // Whether AI proxy is active
+        Provider string `json:"provider"`  // "ollama", "openai", "custom"
+        Endpoint string `json:"endpoint"`  // AI URL
+        APIKey   string `json:"api_key"`   // Optional key
+        Model    string `json:"model"`     // e.g., "llama2"
+    } `json:"ai"`
 	Server struct {
 		// false for ip, true for escape pod
 		EPConfig bool   `json:"epconfig"`
@@ -76,6 +83,16 @@ func CreateConfigFromEnv() {
 	} else {
 		APIConfig.Knowledge.Enable = false
 	}
+	    // New: AI from ENV (defaults to disabled)
+	if os.Getenv("AI_ENABLE") == "true" {
+        APIConfig.AI.Enable = true
+        APIConfig.AI.Provider = os.Getenv("AI_PROVIDER")
+        APIConfig.AI.Endpoint = os.Getenv("AI_ENDPOINT")
+        APIConfig.AI.APIKey = os.Getenv("AI_API_KEY")
+        APIConfig.AI.Model = os.Getenv("AI_MODEL")
+    } else {
+        APIConfig.AI.Enable = false
+    }
 	WriteSTT()
 	APIConfig.HasReadFromEnv = true
 	writeBytes, _ := json.Marshal(APIConfig)
@@ -112,6 +129,22 @@ func ReadConfig() {
 			logger.Println("Failed to unmarshal API config JSON")
 			logger.Println(err)
 			return
+		}
+		// New: AI ENV overrides (after main unmarshal)
+		if envAIEnable := os.Getenv("AI_ENABLE"); envAIEnable != "" {
+			APIConfig.AI.Enable, _ = strconv.ParseBool(envAIEnable)
+		}
+		if envProvider := os.Getenv("AI_PROVIDER"); envProvider != "" {
+			APIConfig.AI.Provider = envProvider
+		}
+		if envEndpoint := os.Getenv("AI_ENDPOINT"); envEndpoint != "" {
+			APIConfig.AI.Endpoint = envEndpoint
+		}
+		if envKey := os.Getenv("AI_API_KEY"); envKey != "" {
+			APIConfig.AI.APIKey = envKey
+		}
+		if envModel := os.Getenv("AI_MODEL"); envModel != "" {
+			APIConfig.AI.Model = envModel
 		}
 		// stt service is the only thing controlled by shell
 		if APIConfig.STT.Service != os.Getenv("STT_SERVICE") {

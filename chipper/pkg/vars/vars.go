@@ -17,6 +17,7 @@ import (
 	"github.com/kercre123/wire-pod/chipper/pkg/logger"
 	"github.com/sashabaranov/go-openai"
 	"github.com/wlynxg/anet"
+	"github.com/Biteldamian/wire-pod/chipper/pkg/wirepod/ai_proxy"
 )
 
 var CommitSHA string
@@ -229,6 +230,9 @@ func Init() {
 
 	// load api config (config.go)
 	ReadConfig()
+	if err := ai_proxy.LoadConfig(); err != nil {
+    logger.Println("Error loading AI config: " + err.Error())
+	}
 
 	// check models folder, add all models to DownloadedVoskModels
 	if APIConfig.STT.Service == "vosk" {
